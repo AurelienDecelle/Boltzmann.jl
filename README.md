@@ -17,6 +17,12 @@ installing latest development version:
     Pkg.clone("https://github.com/dfdx/Boltzmann.jl")
 
 
+TODO Lists
+----------
+
+  * MF and TAP equatinos for the pm1 case
+  * finishing local_biases
+
 RBM Basic Usage
 ---------------
 
