@@ -98,7 +98,6 @@ macro get_array(dict, key, sz, default_expr)
     end)
 end
 
-
 function logistic(x)
     return 1 ./ (1 + exp.(-x))
 end
@@ -137,7 +136,7 @@ const KNOWN_OPTIONS =
      :batch_size, :n_epochs, :n_gibbs,
      :lr, :momentum, :weight_decay_kind, :weight_decay_rate,
      :sparsity_cost, :sparsity_target,
-     :randomize, :approx, :dump,
+     :randomize, :approx, :dump, :sample_app, :TAP_neg_upd,
      # deprecated options
      :n_iter]
 const DEPRECATED_OPTIONS = Dict(:n_iter => :n_epochs)
@@ -216,8 +215,8 @@ function getBiasFromSamples(Data, fact::Float64; eps=1e-8)
         ProbVis = mean(Data,2)             # Mean across  samples
         ProbVis = (ProbVis+1)/2
 
-        ProbVis = max(ProbVis,eps)              # Some regularization (avoid Inf/NaN)
-        ProbVis = min(ProbVis,1 - eps)          # ''
+        ProbVis = max.(ProbVis,eps)              # Some regularization (avoid Inf/NaN)
+        ProbVis = min.(ProbVis,1 - eps)          # ''
 
         InitialVisBias = fact*log.(ProbVis ./ (1-ProbVis)) # Biasing as the log-proportion
     end
@@ -225,5 +224,5 @@ function getBiasFromSamples(Data, fact::Float64; eps=1e-8)
 end
 
 function entropy_bin(x)
-    return -x.*log(x)
+    return -x.*log.(x)
 end

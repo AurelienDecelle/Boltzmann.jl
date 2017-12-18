@@ -13,6 +13,9 @@ import StatsBase: sample, sample!
 @runonce const Gaussian = Distributions.Normal
 @runonce const IsingSpin = Distributions.Categorical
 
+
+
+
 """
 Distribution with a single possible value. Used e.g. during sampling
 to provide stable result equal to provided means:
@@ -222,24 +225,7 @@ function score_samples_tap(rbm::RBM, vis::Mat; n_iter=5)
 
     return fe_tap - fe
 end
-"""
-_, _, m_vis, m_hid = iter_mag(rbm, vis; n_times=n_iter, approx="tap2")
-    eps=1e-6
-    m_vis = max(m_vis, eps)
-    m_vis = min(m_vis, 1.0-eps)
-    m_hid = max(m_hid, eps)
-    m_hid = min(m_hid, 1.0-eps)
 
-    m_vis2 = abs2(m_vis)
-    m_hid2 = abs2(m_hid)
-
-    S = - sum(m_vis.*log(m_vis)+(1.0-m_vis).*log(1.0-m_vis),1) - sum(m_hid.*log(m_hid)+(1.0-m_hid).*log(1.0-m_hid),1)
-    U_naive = - gemv('T',m_vis,rbm.vbias)' - gemv('T',m_hid,rbm.hbias)' - sum(gemm('N','N',rbm.W,m_vis).*m_hid,1)
-    Onsager = - 0.5 * sum(gemm('N','N',rbm.W2,m_vis-m_vis2).*(m_hid-m_hid2),1)    
-    fe_tap = U_naive + Onsager - S
-    fe = free_energy(rbm, vis)
-return fe_tap - fe
-"""
 
 function free_energy_tap(rbm::RBM, mag_vis::Mat, mag_hid::Mat) 
     mag_vis2 = abs2.(mag_vis)
@@ -296,7 +282,7 @@ end
 
 function pseudo_likelihood_tap(rbm::AbstractRBM, X)
     N=size(X,1)
-    mean(score_samples_tap(rbm, X))/N
+    return mean(score_samples_tap(rbm, X))/N
 end
 
 ## gradient calculation
@@ -334,6 +320,15 @@ function persistent_contdiv(rbm::AbstractRBM, vis::Mat, ctx::Dict)
     return v_pos, h_pos, v_neg, h_neg
 end
 
+
+function correction_TAP(::Type{IsingSpin}, rbm::RBM, v_neg::Mat{T}, h_neg::Mat{T}) where T
+    return gemm('N', 'T', 1-abs2.(h_neg), 1-abs2.(v_neg)) .* rbm.W
+end
+
+function correction_TAP(::Type{Bernoulli}, rbm::RBM, v_neg::Mat{T}, h_neg::Mat{T}) where T
+    return gemm('N', 'T', h_neg-abs2.(h_neg), v_neg-abs2.(v_neg)) .* rbm.W
+end
+
 """
 Function for calculating gradient of negative log-likelihood of the data.
 Options:
@@ -345,20 +340,54 @@ Returns:
  * (dW, db, dc) - tuple of gradients for weights, visible and hidden biases,
                   respectively
 """
-function gradient_classic(rbm::RBM, vis::Mat{T}, ctx::Dict) where T
-    sampler = @get_or_create(ctx, :sampler, persistent_contdiv)
+function gradient_classic(rbm::RBM{T,V,H}, vis::Mat{T}, ctx::Dict) where {T,V,H}
+
+    sampler = @get_or_create(ctx, :sampler, persistent_contdiv)    
+
     v_pos, h_pos, v_neg, h_neg = sampler(rbm, vis, ctx)
     dW = @get_array(ctx, :dW_buf, size(rbm.W), similar(rbm.W))
     n_obs = size(vis, 2)
+
+    α = 1 / n_obs
+    β = 1
+    tap_weights = @get_or_create(ctx, :TAP_neg_upd, false)
+    if(tap_weights)
+        α = 1
+        β = getTAPWeigths(rbm,v_neg,h_neg)
+        # println(β)
+    end
     # same as: dW = ((h_pos * v_pos') - (h_neg * v_neg')) / n_obs
-    gemm!('N', 'T', T(1 / n_obs), h_neg, v_neg, T(0.0), dW)
+    gemm!('N', 'T', T(α), h_neg .* β, v_neg, T(0.0), dW)
     gemm!('N', 'T', T(1 / n_obs), h_pos, v_pos, T(-1.0), dW)
+
+    ## Seconde-order MF correction
+    buf2=0
+    approx = @get_or_create(ctx,:approx,"cd")
+    if(approx[1:4] == "tap2")
+        buf2 = correction_TAP(V,rbm,v_neg,h_neg)
+    end
+
+    @. dW .+= -T(1 / n_obs).*buf2
+    ## OLD version Base.axpy!(-T(1 / n_obs), buf2, dW)
     # gradient for vbias and hbias
     db = squeeze(sum(v_pos, 2) - sum(v_neg, 2), 2) ./ n_obs
     dc = squeeze(sum(h_pos, 2) - sum(h_neg, 2), 2) ./ n_obs
     return dW, db, dc
 end
 
+
+function getTAPWeigths(rbm::RBM, m_vis::Mat, m_hid::Mat) 
+    fe_tap = -free_energy_tap(rbm,m_vis,m_hid)
+    # println(fe_tap)
+    max_tap=maximum(fe_tap)
+    # println(max_tap)
+    fe_tap = fe_tap .- max_tap
+    # println(fe_tap)
+    Z = sum(exp.(fe_tap))
+    # println(Z)
+    weights_fe = exp.(fe_tap)./Z 
+    return weights_fe
+end
 
 ## updating
 
@@ -511,17 +540,17 @@ function fit(rbm::RBM{T}, X::Mat, opts::Dict{Any,Any}) where T
                 current_batch += 1
                 fit_batch!(rbm, batch, ctx)
                 #println(batch_end/batch_size)
-                #if ((typeof(reporter) <: BatchReporter) &&
-                #    ((batch_end/batch_size) % 10 == 0))
-		          #reporter.exec(rbm, epoch, scorer(rbm,X), ctx)
-		        #end
+                if ((typeof(reporter) <: BatchReporter) &&
+                    (current_batch % reporter.every) == 0 )
+		          report(reporter,rbm, epoch, current_batch, scorer, X, ctx)
+		        end
             end
         end
         score = scorer(rbm, X)
-        #if typeof(reporter) <: EpochReporter 
-        #report(reporter, rbm, epoch, epoch_time, score, ctx)
+        if typeof(reporter) <: EpochReporter 
+          report(reporter, rbm, epoch, epoch_time, score, X, ctx)        
+        end
         report(epoch, epoch_time, score, ctx)
-        #end
     end
     return rbm
 end
@@ -590,10 +619,10 @@ function iter_mag_training(rbm::RBM, vis::Mat{Float64}, ctx::Dict; n_times=1)
 
     v_pos = vis
     h_pos = mag_hid_nmf(rbm,vis,zeros(1,1)) #rbm.activation(PassVisToHid(rbm,vis))
-    if approx == "nmf"
+    if approx[1:3] == "nmf"
         mag_vis = mag_vis_nmf
         mag_hid = mag_hid_nmf
-    elseif approx == "tap2"
+    elseif approx[1:4] == "tap2"
         mag_vis = mag_vis_tap2
         mag_hid = mag_hid_tap2
     end
@@ -660,3 +689,17 @@ function persistent_meanfield(rbm::RBM, vis::Mat, ctx::Dict)
     return v_pos, h_pos, v_neg, h_neg
 end
 
+
+function recon_error(rbm::RBM{T,V,H}, vis::Mat) where {T,V,H}
+    N = size(rbm.W,2)
+    # Fully forward MF operation to get back to visible samples
+    _,m_hid = sample_hiddens(rbm,vis)
+    _,m_vis = sample_visibles(rbm,m_hid)
+    
+    vis_rec = rbm.means(m_vis)
+    # Get the total error over the whole tested visible set,
+    # here, as MSE
+    dif = vis_rec - vis
+    mse = mean(dif.*dif)
+    return mse/N
+end
