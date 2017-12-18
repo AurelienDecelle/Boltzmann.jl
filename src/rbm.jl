@@ -550,7 +550,7 @@ function fit(rbm::RBM{T}, X::Mat, opts::Dict{Any,Any}) where T
         if typeof(reporter) <: EpochReporter 
           report(reporter, rbm, epoch, epoch_time, score, X, ctx)        
         end
-        report(epoch, epoch_time, score, ctx)
+        ##report(epoch, epoch_time, score, ctx) reput it if problems !
     end
     return rbm
 end
