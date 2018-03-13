@@ -51,11 +51,11 @@ X = X .* 2 - 1
 #X = X .* 2 - 1 
 
 
-rbm = IsingRBM(28*28, 100; TrainData=X)
-# rbm = IsingRBM(28*28,100) #; TrainData=X)
+# rbm = IsingRBM(28*28, 100; TrainData=X)
+rbm = IsingRBM(28*28,1) #; TrainData=X)
 #rbm = BernoulliRBM(28*28, 500; TrainData=X)
 # rbm.W = (rand(size(rbm.W))*2-1) * 4 * sqrt(6/(784*500))/4
-rbm.W = rand(Normal(0, 0.0001), 100, 784)
+# rbm.W = rand(Normal(0, 0.0001), 100, 784)
 
 
 # params = Dict(:n_epochs => 5, 
@@ -75,23 +75,36 @@ ApproxSampler["nmf_pcd"] = Boltzmann.persistent_meanfield
 ApproxSampler["tap2"] = Boltzmann.sampler_UpdMeanfield
 ApproxSampler["tap2_pcd"] = Boltzmann.persistent_meanfield
 
-vr = default_reporter(rbm, 20, X)
+# vr = default_reporter(rbm, 20, X)
 
 params = Dict()
-params[:n_epochs] = 40
+params[:n_epochs] = 50
 params[:batch_size] = 20
-params[:n_gibbs] = 3
+params[:n_gibbs] = 5
 params[:randomize] = true
-params[:sampler] = Boltzmann.sampler_UpdMeanfield
-params[:lr] = 0.0002
-params[:approx] = "tap2"
+# params[:sampler] = Boltzmann.sampler_UpdMeanfield
+params[:lr] = 0.00005
+params[:approx] = "pcd"
 params[:dump] = 0.1
-params[:reporter] = vr
+# params[:reporter] = vr
 params[:sample_app] = ApproxSampler
 params[:sampler] = ApproxSampler[params[:approx]]
-params[:TAP_neg_upd] = true
+params[:TAP_neg_upd] = false
 
-fit(rbm, X, params)
+nbH = 1
+addH = 5
+sampling = []
+while(nbH<62)
+	#if(nbH>20)
+	#	params[:n_epochs] = 20
+	# end
+	fit(rbm, X, params)
+	Boltzmann.addHidden(rbm,addH)
+	vp,hp,vn,hn = Boltzmann.gibbs_training(rbm,X[:,1:100];n_times=1000)
+	push!(sampling,[vn,hn])
+	nbH += addH
+	# addH *= 2
+end
 #fit(rbm, X, n_epochs=20, batch_size=20, n_gibbs=2, randomize=true, 
 #    sampler=Boltzmann.sampler_UpdMeanfield, approx="tap2", lr=0.00001,
 #    dump=0.1 ,reporter=vr)
@@ -134,3 +147,48 @@ for i=1:size(rbm.saving_tmp,1)
 end
 
 
+nH = 76
+v_t = zeros(size(rbm.saving_tmp,1),nH,nH);
+for i=1:size(rbm.saving_tmp,1)
+	a = zeros(nH,nH)
+	# b = zeros(784,nH)
+	si = size(rbm.saving_tmp[i][3])
+	if(si==1) si = [1,1] end
+	a[1:si[1],1:si[2]] = rbm.saving_tmp[i][3]
+	v_t[i,:,:] = a
+	# v_t[i,:,:] = rbm.saving_tmp[i][3]
+end
+
+k = zeros(size(rbm.saving_tmp,1),nH);
+for i=1:size(rbm.saving_tmp,1), j=1:nH k[i,j]  =kurtosis(v_t[i,:,j]) end
+k[find(x->isnan(x),k)] = 0;
+
+ss = zeros(size(rbm.saving_tmp,1),nH);
+for i=1:size(rbm.saving_tmp,1) ss[i,:]=vcat(rbm.saving_tmp[i][4],zeros(nH-size(rbm.saving_tmp[i][4],1))) end
+
+u,s,v = svd(rbm.W)
+kv = zeros(size(v,2))
+for i=1:size(v,2) kv[i] = kurtosis(v[:,i]) end
+
+function sample(rbm; X=rand(784,1), t=1000, Δt=10)
+	vn = X
+	nt = round(Int,t/Δt)
+	vn_s = zeros(784,nt)
+	for	i=1:nt
+		vp,hp,vn,hn = Boltzmann.gibbs_training(rbm,vn; n_times=Δt)
+		vn_s[:,i] = vn
+	end
+	return vn_s
+end
+
+function sample_save(rbm; X=rand(784,1), t=1000, Δt=10)
+	vn = X
+	nt = round(Int,t/Δt)
+	for	i=1:nt
+		vp,hp,vn,hn = Boltzmann.gibbs_training(rbm,vn; n_times=Δt)
+		plt[:clf]()
+		# plt[:imshow](reshape(vn,28,28))
+		plt[:imshow](reshape(tanh.(rbm.W'*hn),28,28))
+		plt[:savefig](string("s_",i,".png"))
+	end
+end

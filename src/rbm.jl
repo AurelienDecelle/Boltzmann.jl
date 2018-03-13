@@ -56,6 +56,7 @@ end
         means::Function
         marg::Function
         flip::Function
+        saving_tmp::Array{Any,1}
     end
 
 end
@@ -78,7 +79,7 @@ Optional parameters:
 function RBM(T::Type, V::Type, H::Type, activation::Function, means::Function, marg::Function,
              flip::Function, n_vis::Int, n_hid::Int; sigma=0.01, InitVisBias=zeros(n_vis))
     RBM{T,V,H}(map(T, rand(Normal(0, sigma), n_hid, n_vis)), zeros(n_hid, n_vis),
-             InitVisBias, zeros(n_hid), activation, means, marg, flip)
+             InitVisBias, zeros(n_hid), activation, means, marg, flip, [])
 end
 
 RBM(V::Type, H::Type, n_vis::Int, n_hid::Int; sigma=0.01, InitVisBias=zeros(n_vis)) =
@@ -108,6 +109,22 @@ function IsingRBM(n_vis::Int, n_hid::Int; sigma=0.01, TrainData=[])
         InitialVisBias = getBiasFromSamples(TrainData, 0.5)
     end
 	return RBM(Float64, IsingSpin, IsingSpin, IsingActivation, MeansIsing, MargHiddenIsing, FlipIsing, n_vis, n_hid; InitVisBias=InitialVisBias[:,1])
+end
+
+function addHidden(rbm::RBM, nh_add::Int; σ=0.01)
+    nh = size(rbm.W,1)
+    nv = size(rbm.W,2)
+    new_W = zeros(nh+nh_add,nv)
+    new_W[1:nh,:] = rbm.W
+    new_W[(nh+1):end,:] = rand(Normal(0,σ),nh_add,nv)
+    rbm.W = new_W
+    rbm.W2 = rbm.W.^2
+
+    new_hb = zeros(nh+nh_add)   
+    new_hb[1:nh]  = rbm.hbias
+    rbm.hbias = new_hb
+
+    return rbm
 end
 
 function Base.show(io::IO, rbm::RBM{T,V,H}) where {T,V,H}
@@ -320,13 +337,14 @@ function persistent_contdiv(rbm::AbstractRBM, vis::Mat, ctx::Dict)
     return v_pos, h_pos, v_neg, h_neg
 end
 
-
 function correction_TAP(::Type{IsingSpin}, rbm::RBM, v_neg::Mat{T}, h_neg::Mat{T}) where T
-    return gemm('N', 'T', 1-abs2.(h_neg), 1-abs2.(v_neg)) .* rbm.W
+    return (1.-abs2.(h_neg))*(1.-abs2.(v_neg))' .* rbm.W
+    # return gemm('N', 'T', 1-abs2.(h_neg), 1-abs2.(v_neg)) .* rbm.W
 end
 
 function correction_TAP(::Type{Bernoulli}, rbm::RBM, v_neg::Mat{T}, h_neg::Mat{T}) where T
-    return gemm('N', 'T', h_neg-abs2.(h_neg), v_neg-abs2.(v_neg)) .* rbm.W
+    return (h_neg.-abs2.(h_neg))*(v_neg.-abs2.(v_neg))' .* rbm.W
+    # return gemm('N', 'T', h_neg-abs2.(h_neg), v_neg-abs2.(v_neg)) .* rbm.W
 end
 
 """
@@ -349,29 +367,40 @@ function gradient_classic(rbm::RBM{T,V,H}, vis::Mat{T}, ctx::Dict) where {T,V,H}
     n_obs = size(vis, 2)
 
     α = 1 / n_obs
-    β = 1
+    β = 1 / n_obs
     tap_weights = @get_or_create(ctx, :TAP_neg_upd, false)
     if(tap_weights)
-        α = 1
-        β = getTAPWeigths(rbm,v_neg,h_neg)
-        # println(β)
+        # α = 1
+        # β = sqrt.(getTAPWeigths(rbm,v_neg,h_neg))
+        #h_neg = h_neg .* β
+        #println(β)
     end
+
+    ## v_neg = v_neg .* β
+    ## h_neg = h_neg .* β
     # same as: dW = ((h_pos * v_pos') - (h_neg * v_neg')) / n_obs
-    gemm!('N', 'T', T(α), h_neg .* β, v_neg, T(0.0), dW)
-    gemm!('N', 'T', T(1 / n_obs), h_pos, v_pos, T(-1.0), dW)
+    # gemm!('N', 'T', T(α), h_neg, v_neg, T(0.0), dW)
+    # gemm!('N', 'T', T(1 / n_obs), h_pos, v_pos, T(-1.0), dW)
+    dW = (h_pos*v_pos' .* α) .- (h_neg*v_neg' .* β)
 
     ## Seconde-order MF correction
     buf2=0
     approx = @get_or_create(ctx,:approx,"cd")
-    if(approx[1:4] == "tap2")
-        buf2 = correction_TAP(V,rbm,v_neg,h_neg)
+    if(approx.len>3)
+        if(approx[1:4] == "tap2")
+            buf2 = correction_TAP(V,rbm,v_neg,h_neg) # check that !
+        end
+        @. dW .+= -T(1 / n_obs).*buf2    
     end
 
-    @. dW .+= -T(1 / n_obs).*buf2
+    #if(tap_weights)
+    #     v_neg = v_neg .* β
+    #end
+    
     ## OLD version Base.axpy!(-T(1 / n_obs), buf2, dW)
     # gradient for vbias and hbias
-    db = squeeze(sum(v_pos, 2) - sum(v_neg, 2), 2) ./ n_obs
-    dc = squeeze(sum(h_pos, 2) - sum(h_neg, 2), 2) ./ n_obs
+    db = squeeze(sum(v_pos, 2).*α - sum(v_neg, 2), 2).*β
+    dc = squeeze(sum(h_pos, 2).*α - sum(h_neg, 2), 2).*β
     return dW, db, dc
 end
 
@@ -450,7 +479,7 @@ end
 function update_weights!(rbm::RBM, dtheta::Tuple, ctx::Dict)
     dW, db, dc = dtheta
     axpy!(1.0, dW, rbm.W)
-    rbm.vbias += db
+    ## rbm.vbias += db
     rbm.hbias += dc
     # save previous dW
     dW_prev = @get_array(ctx, :dW_prev, size(dW), similar(dW))
@@ -468,25 +497,41 @@ are applied to gradients:
  * weight decay (see `grad_apply_weight_decay!` for details)
  * sparsity (see `grad_apply_sparsity!` for details)
 """
-function update_classic!(rbm::RBM, X::Mat, dtheta::Tuple, ctx::Dict)
+function update_classic!(rbm::RBM, X::Mat, dtheta::Tuple, ctx::Dict; id=-1)
     # apply gradient updaters. note, that updaters all have
     # the same signature and are thus composable
     grad_apply_learning_rate!(rbm, X, dtheta, ctx)
     grad_apply_momentum!(rbm, X, dtheta, ctx)
     grad_apply_weight_decay!(rbm, X, dtheta, ctx)
     grad_apply_sparsity!(rbm, X, dtheta, ctx)
+
+    # _,s,_ = svd(rbm.W)
+    # println(id," ",s)
+
+    # some treatment
+    if(((id-1)%10)==-0)        
+        print("*")
+        dW,_,_ = dtheta
+        u,s,v = svd(rbm.W)
+        dWα = u'dW*v        
+        push!(rbm.saving_tmp,[0,0,u,s,0])
+        # push!(rbm.saving_tmp,[dW,dWα,u,s,v])
+    end
+
     # add gradient to the weight matrix
     update_weights!(rbm, dtheta, ctx)
+
+
 end
 
 
 ## fitting
 
-function fit_batch!(rbm::RBM, X::Mat, ctx = Dict())
+function fit_batch!(rbm::RBM, X::Mat, ctx = Dict(); id=-1)
     grad = @get_or_create(ctx, :gradient, gradient_classic)
     upd = @get_or_create(ctx, :update, update_classic!)
     dtheta = grad(rbm, X, ctx)
-    upd(rbm, X, dtheta, ctx)
+    upd(rbm, X, dtheta, ctx; id=id)
     return rbm
 end
 
@@ -538,19 +583,20 @@ function fit(rbm::RBM{T}, X::Mat, opts::Dict{Any,Any}) where T
                 batch = full(X[:, batch_start:batch_end])
                 batch = ensure_type(T, batch)
                 current_batch += 1
-                fit_batch!(rbm, batch, ctx)
+                fit_batch!(rbm, batch, ctx; id=current_batch)
                 #println(batch_end/batch_size)
-                if ((typeof(reporter) <: BatchReporter) &&
-                    (current_batch % reporter.every) == 0 )
-		          report(reporter,rbm, epoch, current_batch, scorer, X, ctx)
-		        end
+                ##if ((typeof(reporter) <: BatchReporter) &&
+                ##    (current_batch % reporter.every) == 0 )
+		        ##  report(reporter,rbm, epoch, current_batch, scorer, X, ctx)
+		        ##end
             end
         end
         score = scorer(rbm, X)
         if typeof(reporter) <: EpochReporter 
           report(reporter, rbm, epoch, epoch_time, score, X, ctx)        
         end
-        ##report(epoch, epoch_time, score, ctx) reput it if problems !
+        println("[Epoch $epoch] Score: $(scorer(rbm, X)) [$(epoch_time)s]")
+        # report(epoch, epoch_time, score, ctx) #     reput it if problems !
     end
     return rbm
 end
