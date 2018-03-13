@@ -98,9 +98,36 @@ macro get_array(dict, key, sz, default_expr)
     end)
 end
 
-
 function logistic(x)
     return 1 ./ (1 + exp.(-x))
+end
+
+function IsingActivation(x)
+  return 1 ./ (1 + exp.(-2x))
+end
+
+function MeansBernoulli(x)
+  return x
+end
+
+function MeansIsing(x)
+  return 2*x-1
+end
+
+function MargHiddenBernoulli(x)
+  return 1+exp.(x)
+end
+
+function MargHiddenIsing(x)
+  return 2*cosh.(x)
+end
+
+function FlipBernoulli(x)
+  return 1-x
+end
+
+function FlipIsing(x)
+    -x
 end
 
 
@@ -109,7 +136,7 @@ const KNOWN_OPTIONS =
      :batch_size, :n_epochs, :n_gibbs,
      :lr, :momentum, :weight_decay_kind, :weight_decay_rate,
      :sparsity_cost, :sparsity_target,
-     :randomize,
+     :randomize, :approx, :dump, :sample_app, :TAP_neg_upd,
      # deprecated options
      :n_iter]
 const DEPRECATED_OPTIONS = Dict(:n_iter => :n_epochs)
@@ -164,7 +191,7 @@ function tofinite!(x::Array; nozeros=false)
         if x[i] == 0.0 && nozeros
             x[i] = nextfloat(x[i])
         end
-    end
+    end 
 end
 
 
@@ -180,4 +207,22 @@ function add!(X::Array{T}, inc::T) where T
     @simd for i=1:length(X)
         @inbounds X[i] += inc
     end
+end
+
+function getBiasFromSamples(Data, fact::Float64; eps=1e-8)
+    InitialVisBias = zeros(size(Data,1))
+    if !isempty(Data)
+        ProbVis = mean(Data,2)             # Mean across  samples
+        ProbVis = (ProbVis+1)/2
+
+        ProbVis = max.(ProbVis,eps)              # Some regularization (avoid Inf/NaN)
+        ProbVis = min.(ProbVis,1 - eps)          # ''
+
+        InitialVisBias = fact*log.(ProbVis ./ (1-ProbVis)) # Biasing as the log-proportion
+    end
+    return InitialVisBias[:,1]
+end
+
+function entropy_bin(x)
+    return -x.*log.(x)
 end

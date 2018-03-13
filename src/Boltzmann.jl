@@ -6,6 +6,7 @@ export AbstractRBM,
        BernoulliRBM,
        GRBM,
        ConditionalRBM,
+       IsingRBM,
        DBN,
        DAE,
        Bernoulli,
@@ -21,7 +22,10 @@ export AbstractRBM,
        vbias,
        unroll,
        save_params,
-       load_params
+       load_params,
+       persistent_meanfield,
+       sampler_UpdMeanfield,
+       iter_mag
 
 include("core.jl")
 
